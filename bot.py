@@ -180,6 +180,10 @@ class Bot:
             arrival = max(0.0, d - drop.get("radius", 8.0)) / speed
             remaining = max(0.0, drop.get("capture_s", 4.0) - drop.get("progress", 0.0))
             holder = drop.get("holder")
+            visible_enemies = any(m.get("kind") == "mech" for m in obs.get("mechs", []))
+            if (holder == me.get("id")
+                    and (visible_enemies or float(obs.get("t", 0.0)) - self.last_damage_t <= 2.5)):
+                continue
             if holder is not None and holder != me.get("id") and remaining <= arrival:
                 continue
             capture = remaining if holder == me.get("id") else drop.get("capture_s", 4.0)
@@ -319,6 +323,17 @@ class Bot:
                  if roof > z + 1.2 and base < z + height
                  and l - 20 - radius <= x <= r + 20 + radius
                  and b - 20 - radius <= y <= top + 20 + radius]
+        local_boxes = [(l, r, b, top)
+                       for l, r, b, top, base, roof in self.obstacles
+                       if roof > z + 1.2 and base < z + height
+                       and l - 30.0 <= x <= r + 30.0
+                       and b - 30.0 <= y <= top + 30.0]
+        enemies = [m for m in obs.get("mechs", []) if m.get("kind") == "mech"]
+        threat_pos = min(
+            enemies,
+            key=lambda enemy: distance3(me["pos"], enemy.get("pos", me["pos"])),
+            default=None,
+        )
 
         def clearance(dx, dy):
             for step in (2, 4, 8, 12, 16):
@@ -341,6 +356,14 @@ class Bot:
             travel = min(10.0, room - 1.0)
             remaining = math.hypot(gx - (x + travel * dx), gy - (y + travel * dy))
             score = distance - remaining + 0.45 * room + 8.0 * (dx * dodge_x + dy * dodge_y)
+            if self.current_mode == 1 and threat_pos is not None:
+                next_x, next_y = x + travel * dx, y + travel * dy
+                threat_x, threat_y = threat_pos.get("pos", me["pos"])[:2]
+                midpoint_x = 0.5 * (next_x + threat_x)
+                midpoint_y = 0.5 * (next_y + threat_y)
+                if any(left <= midpoint_x <= right and bottom <= midpoint_y <= top
+                       for left, right, bottom, top in local_boxes):
+                    score += 6.0
             if now < self.detour_until:
                 score += 12.0 * math.sin(math.radians(offset)) * side
             if score > best_score:
@@ -514,7 +537,21 @@ class Bot:
                 mode = 2
                 loot_goal = opening_pickup["pos"]
 
-        if must_rotate or mode == 3:
+        enemies = [enemy for enemy in obs.get("mechs", []) if enemy.get("kind") == "mech"]
+        capturing_drop = next(
+            (
+                drop for drop in obs.get("drops", ())
+                if drop.get("holder") == me.get("id") and drop.get("progress", 0.0) > 0.0
+                and me.get("in_zone", True) and me.get("hp", 0.0) > 500.0
+                and not enemies and now - self.last_damage_t > 2.5
+            ),
+            None,
+        )
+
+        if capturing_drop is not None:
+            mode = 2
+            goal = capturing_drop["pos"][:2]
+        elif must_rotate or mode == 3:
             goal = self.safe_edge_anchor(obs)
         elif mode == 2 and loot_goal is not None:
             goal = loot_goal[:2]
@@ -577,6 +614,9 @@ class Bot:
         target = self.target_for_combat(obs)
         if target is not None:
             action["aim"], action["fire"] = self.compute_aim_and_fire(obs, target)
+            if ((mode in (1, 3) or must_rotate)
+                    and distance3(me["pos"], target.get("pos", me["pos"])) > 55.0):
+                action["fire"] = [False] * len(weapons)
         else:
             action["fire"] = [False] * len(weapons)
             if self.alert_yaw is not None and (now < self.alert_until or mode == 1):
