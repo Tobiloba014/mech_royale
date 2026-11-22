@@ -95,7 +95,6 @@ class Bot:
         self.alert_until = 0.0
         self.scan_yaw = (self.slot * 0.4) % (2.0 * math.pi) - math.pi
         self.sound_memory: list[tuple[float, float, float]] = []
-        self.starter_target = None
 
         self.obstacles = []
         try:
@@ -126,39 +125,6 @@ class Bot:
         enemies = [m for m in obs.get("mechs", []) if m.get("kind") == "mech"]
         return min(enemies, key=lambda m: distance3(me.get("pos", (0, 0, 0)), m.get("pos", (0, 0, 0))), default=None)
 
-    def remember_sounds(self, obs):
-        now = float(obs.get("t", 0.0))
-        packets = obs.get("sounds")
-        if packets is None:
-            packets = [e for e in obs.get("events", []) if e.get("type") in ("heard", "sound")]
-        weights = {"near": 0.70, "mid": 0.45, "far": 0.12}
-        fresh = [(now - max(0.0, p.get("age", 0.0)), p["bearing"],
-                  weights.get(p.get("dist"), p.get("weight", 1.0)))
-                 for p in packets if p.get("bearing") is not None and p.get("age", 0.0) < 1.5]
-        # Refresh an old bearing on a new report. Two sounds in the same packet still count.
-        self.sound_memory = [(t, b, w) for t, b, w in self.sound_memory
-                             if now - t < 1.5 and all(abs(angle_diff(b, a)) > 0.22 for _, a, _ in fresh)]
-        self.sound_memory.extend(fresh)
-
-    def active_sounds(self, now):
-        return [(b, w * (1.0 - (now - t) / 1.5)) for t, b, w in self.sound_memory
-                if 0.0 <= now - t < 1.5]
-
-    def sound_level(self, now):
-        return min(1.0, sum(w for _, w in self.active_sounds(now)))
-
-    def in_take_range(self, pos, item):
-        px, py, pz = item["pos"]
-        return math.hypot(pos[0] - px, pos[1] - py) <= self.pickup_radius and abs(pos[2] - pz) <= 4.0
-
-    def is_in_safe_circle(self, pos, zone, margin=4.0):
-        """Return whether a map position is safely inside the current circle."""
-        center = zone.get("center")
-        radius = zone.get("radius")
-        if center is None or radius is None:
-            return True
-        return math.hypot(pos[0] - center[0], pos[1] - center[1]) <= max(0.0, radius - margin)
-
     def loot_target(self, obs):
         me = obs["self"]
         pos = me.get("pos", (0.0, 0.0, 0.0))
@@ -171,34 +137,18 @@ class Bot:
         candidates = []
         loot_nearby = 0.0
         drop_opp = 0.0
-        zone = obs.get("zone", {})
 
         for cube in obs.get("cubes", []):
-            if cube.get("pos") is None or not self.is_in_safe_circle(cube["pos"], zone):
-                continue
             d = distance3(pos, cube.get("pos", pos))
             if d < 130.0:
                 candidates.append((d / speed, cube.get("pos")))
                 loot_nearby = max(loot_nearby, clamp(1.0 - d / 260.0, 0.0, 1.0))
 
-        free_slot = len(weapons) < 2 or None in weapons
-        quiet = self.sound_level(float(obs.get("t", 0.0))) < 0.4
-        visible = any(m.get("kind") == "mech" for m in obs.get("mechs", []))
-        seeking_first_weapon = held == {"gun"} and free_slot and me.get("in_zone", True)
-        priority = []
-        if free_slot:
+        can_take = len(weapons) < 2 or any(w is None for w in weapons) or "gun" in held
+        if can_take:
             for item in obs.get("pickups", []):
                 kind = item.get("kind")
-                if item.get("pos") is None or not self.is_in_safe_circle(item["pos"], zone):
-                    continue
                 d = distance3(pos, item.get("pos", pos))
-                if seeking_first_weapon and kind not in (None, "gun"):
-                    in_range = self.in_take_range(pos, item)
-                    near_weapon = 1.0 - d / 260.0 > 0.65
-                    pursue = ((not visible and (quiet or (hp_ratio > 0.75 and near_weapon)))
-                              or (visible and hp_ratio >= 0.55 and d <= 70.0))
-                    if in_range or pursue:
-                        priority.append((not in_range, d, item["id"], item))
                 if d < 130.0 and kind not in (None, "gun") and kind not in held:
                     value = 2.0 if len(held) < 2 else 1.2
                     candidates.append((d / (speed * value), item.get("pos")))
@@ -206,8 +156,6 @@ class Bot:
 
         if hp_ratio > 0.50 and held:
             for crate in obs.get("crates", []):
-                if crate.get("pos") is None or not self.is_in_safe_circle(crate["pos"], zone):
-                    continue
                 d = distance3(pos, crate.get("pos", pos))
                 if d < 100.0:
                     hp_left = crate.get("hp", 300.0) / 300.0
@@ -218,8 +166,6 @@ class Bot:
             for npc in obs.get("mechs", []):
                 if npc.get("kind") != "npc":
                     continue
-                if npc.get("pos") is None or not self.is_in_safe_circle(npc["pos"], zone):
-                    continue
                 d = distance3(pos, npc.get("pos", pos))
                 if d < 100.0:
                     hp_left = npc.get("hp", npc_cfg.get("hp", 350.0)) / max(1.0, npc_cfg.get("hp", 350.0))
@@ -228,8 +174,6 @@ class Bot:
                     loot_nearby = max(loot_nearby, 0.65)
 
         for drop in obs.get("drops", []):
-            if drop.get("pos") is None or not self.is_in_safe_circle(drop["pos"], zone):
-                continue
             d = distance3(pos, drop.get("pos", pos))
             if d >= 180.0 or drop.get("lands_in", 999.0) >= 18.0:
                 continue
@@ -245,10 +189,6 @@ class Bot:
             candidates.append((cost, drop.get("pos")))
             drop_opp = max(drop_opp, clamp(1.0 - d / 180.0, 0.0, 1.0))
 
-        self.starter_target = min(priority, key=lambda p: p[:3])[3] if priority else None
-        if self.starter_target is not None:
-            pickup_signal = 1.0 if quiet and not visible else loot_nearby
-            return self.starter_target["pos"], pickup_signal, drop_opp
         candidates = [(cost, p) for cost, p in candidates if p is not None]
         goal = min(candidates, key=lambda c: c[0])[1] if candidates else None
         return goal, loot_nearby, drop_opp
@@ -263,8 +203,8 @@ class Bot:
         outside = 0.0 if me.get("in_zone", True) else 1.0
 
         zone = obs.get("zone", {})
-        cx, cy = zone["center"]
-        radius = max(1.0, zone["radius"])
+        cx, cy = zone.get("center", zone.get("next_center", (x, y)))
+        radius = max(1.0, zone.get("radius", zone.get("next_radius", 1.0)))
         urgency = clamp((math.hypot(x - cx, y - cy) / radius) ** 2, 0.0, 1.0)
 
         enemies = [m for m in obs.get("mechs", []) if m.get("kind") == "mech"]
@@ -288,7 +228,12 @@ class Bot:
             loot_nearby, drop_opp = loot_signals
 
         debuffed = float(now < self.shorted_until or now < self.concussed_until)
-        sound_threat = self.sound_level(now)
+        sound_threat = sum(
+            weight * max(0.0, 1.0 - (now - timestamp) / 3.0)
+            for timestamp, _bearing, weight in self.sound_memory
+            if now - timestamp <= 3.0
+        )
+        sound_threat = clamp(sound_threat, 0.0, 1.0)
 
         return [
             clamp(hp, 0.0, 1.0), clamp(energy, 0.0, 1.0), outside, urgency,
@@ -313,39 +258,6 @@ class Bot:
         theta = self.slot * 2.39996 + float(obs.get("t", 0.0)) * 0.08
         ring = min(max(12.0, radius * 0.68), max(12.0, radius - 15.0))
         return [cx + ring * math.cos(theta), cy + ring * math.sin(theta)]
-
-    def retreat_goal(self, obs, outside):
-        x, y = obs["self"]["pos"][:2]
-        zone = obs["zone"]
-        cx, cy = zone["center"]
-        sources = []
-        for enemy in obs.get("mechs", []):
-            if enemy.get("kind") != "mech":
-                continue
-            ex, ey = enemy["pos"][:2]
-            d = math.hypot(ex - x, ey - y)
-            if d > 1e-8:
-                sources.append((math.atan2(ey - y, ex - x), 1.0 / (1.0 + d / 60.0)))
-        sources.extend(self.active_sounds(float(obs.get("t", 0.0))))
-        if not sources:
-            return ((cx, cy) if outside else self.safe_edge_anchor(obs)), None
-
-        tx = sum(w * math.cos(b) for b, w in sources)
-        ty = sum(w * math.sin(b) for b, w in sources)
-        if math.hypot(tx, ty) < 0.05 * sum(w for _, w in sources):
-            bearing = max(sources, key=lambda s: s[1])[0]
-            tx, ty = math.cos(bearing), math.sin(bearing)
-        tx, ty = unit2(tx, ty)
-        side = self.detour_side * (1 if self.slot % 2 == 0 else -1)
-        dx, dy = unit2(-tx - 0.45 * side * ty, -ty + 0.45 * side * tx)
-        if outside:
-            ix, iy = unit2(cx - x, cy - y)
-            dx, dy = unit2(2.0 * ix + dx, 2.0 * iy + dy)
-        gx, gy = x + 32.0 * dx, y + 32.0 * dy
-        if not outside and math.hypot(gx - cx, gy - cy) > zone["radius"]:
-            ux, uy = unit2(gx - cx, gy - cy)
-            gx, gy = cx + 0.99 * zone["radius"] * ux, cy + 0.99 * zone["radius"] * uy
-        return (gx, gy), math.atan2(ty, tx)
 
     def projectile_dodge_vector(self, obs):
         me = obs["self"]
@@ -418,18 +330,11 @@ class Bot:
 
         best_score = -math.inf
         best_move = [0.0, 0.0]
-        zone = obs.get("zone", {})
         side = self.detour_side
         for offset in (0, 30 * side, -30 * side, 60 * side, -60 * side,
                        90 * side, -90 * side, 135 * side, -135 * side, 180):
             angle = heading + math.radians(offset)
             dx, dy = math.cos(angle), math.sin(angle)
-            # Keep the next movement segment inside the current circle, including
-            # combat strafes when an opponent is close to the boundary.
-            if me.get("in_zone", True) and not self.is_in_safe_circle(
-                (x + 8.0 * dx, y + 8.0 * dy), zone, margin=1.0
-            ):
-                continue
             room = clearance(dx, dy)
             if room <= 2:
                 continue
@@ -440,24 +345,9 @@ class Bot:
                 score += 12.0 * math.sin(math.radians(offset)) * side
             if score > best_score:
                 best_score, best_move = score, [dx, dy]
-        if best_score == -math.inf and me.get("in_zone", True):
-            cx, cy = zone.get("center", (x, y))
-            inward = math.atan2(cy - y, cx - x)
-            best_move = [math.cos(inward), math.sin(inward)]
         jump = bool(self.stuck_ticks >= 2 and me.get("grounded", False)
                     and me.get("energy", 0.0) > 35.0)
         return best_move, jump, urgent
-
-    def has_line_of_sight(self, x1, y1, z1, x2, y2, z2):
-        """Check sampled muzzle-to-target points against map building prisms."""
-        for fraction in (0.25, 0.5, 0.75):
-            px = x1 + (x2 - x1) * fraction
-            py = y1 + (y2 - y1) * fraction
-            pz = z1 + (z2 - z1) * fraction
-            for left, right, bottom, top, base, roof in self.obstacles:
-                if base <= pz <= roof and left <= px <= right and bottom <= py <= top:
-                    return False
-        return True
 
     def target_for_combat(self, obs):
         me = obs["self"]
@@ -472,112 +362,70 @@ class Bot:
         me = obs["self"]
         now = float(obs.get("t", 0.0))
         mx, my, mz = me["pos"]
-        cur_yaw, _ = me["aim"]
+        aim = me.get("aim", [0.0, 0.0])
+        cur_yaw = aim[0] if aim else 0.0
         muzzle_z = mz + me.get("stats", {}).get("muzzle_height", 7.0)
-
-        tx, ty, tz = target["pos"]
+        tx, ty, tz = target.get("pos", (mx, my, mz))
+        # Crates and some NPC records have no vel/kind; both are safe here.
         tvx, tvy, tvz = target.get("vel", (0.0, 0.0, 0.0))
-        target_center_z = tz + (4.5 if target.get("kind") == "mech" else 1.5)
-
-        dx, dy, dz = tx - mx, ty - my, target_center_z - muzzle_z
-        dist_2d = math.hypot(dx, dy)
-        dist_3d = math.hypot(dist_2d, dz)
-        aim_yaw = math.atan2(dy, dx)
-        aim_pitch = math.atan2(dz, max(0.1, dist_2d))
+        kind_target = target.get("kind", "")
+        center_z = tz + (4.5 if kind_target == "mech" else 1.5)
         weapons = me.get("weapons", [])
         fire = [False] * len(weapons)
-
-        priority = {"laser": 4, "lightning": 3, "mortar": 2, "gun": 1}
-        ordered_slots = sorted(
-            [i for i, weapon in enumerate(weapons) if weapon is not None],
-            key=lambda i: priority.get(weapons[i].get("kind"), 0),
-            reverse=True,
-        )
-
-        aim_locked = False
+        dx, dy, dz = tx - mx, ty - my, center_z - muzzle_z
+        d2 = math.hypot(dx, dy)
+        d3 = math.hypot(d2, dz)
+        yaw = math.atan2(dy, dx)
+        pitch = math.atan2(dz, max(0.1, d2))
+        priorities = {"laser": 4, "lightning": 3, "mortar": 2, "gun": 1}
+        slots = sorted((i for i, w in enumerate(weapons) if isinstance(w, dict)),
+                       key=lambda i: priorities.get(weapons[i].get("kind"), 0), reverse=True)
+        locked = False
         mortar_lobbing = False
-        direct_los = self.has_line_of_sight(mx, my, muzzle_z, tx, ty, target_center_z)
-
-        for slot in ordered_slots:
-            weapon = weapons[slot]
-            kind = weapon["kind"]
+        for i in slots:
+            weapon = weapons[i]
+            wkind = weapon.get("kind")
             stats = weapon.get("stats", {})
-
-            if kind == "laser":
-                if now < self.shorted_until:
-                    fire[slot] = False
-                    continue
-                charge = float(weapon.get("charge", 0.0))
-                full_charge = max(0.01, float(stats.get("charge", 0.75)))
-                # Release well before the 1.6 s cookoff, even if the target
-                # moved behind cover or outside range while the laser charged.
+            reach = float(stats.get("range", self.cfg.get("weapons", {}).get(wkind, {}).get("range", 0.0)))
+            if wkind == "gun" and not mortar_lobbing and d3 <= reach and weapon.get("reload", 0) == 0:
+                speed = max(1.0, float(stats.get("speed", 250.0)))
+                flight = d3 / speed
+                ax = tx + tvx * flight - mx
+                ay = ty + tvy * flight - my
+                az = center_z + tvz * flight - muzzle_z
+                if not locked:
+                    yaw, pitch = math.atan2(ay, ax), math.atan2(az, max(0.1, math.hypot(ax, ay)))
+                    locked = True
+                if abs(angle_diff(yaw, cur_yaw)) < 0.25:
+                    fire[i] = True
+            elif wkind == "laser" and d3 <= reach and now >= self.shorted_until:
+                if not locked:
+                    yaw, pitch = math.atan2(dy, dx), math.atan2(dz, max(0.1, d2))
+                    locked = True
+                charge = weapon.get("charge", 0.0)
                 if charge >= 1.20:
-                    fire[slot] = False
                     continue
-                if charge > 0.0 and not direct_los:
-                    fire[slot] = False
-                    continue
-                if dist_3d <= stats.get("range", 0.0) and direct_los:
-                    if not aim_locked:
-                        aim_yaw = math.atan2(dy, dx)
-                        aim_pitch = math.atan2(dz, max(0.1, dist_2d))
-                        aim_locked = True
-                    yaw_error = abs(angle_diff(aim_yaw, cur_yaw))
-                    if charge < full_charge * 0.85:
-                        fire[slot] = True
-                    elif yaw_error >= 0.12:
-                        fire[slot] = True
-
-            elif kind == "lightning":
-                cone_rad = math.radians(stats.get("cone_deg", 30.0) * 0.5)
-                if (dist_3d <= stats.get("range", 0.0) and direct_los
-                        and me.get("energy", 0.0) >= stats.get("energy", 15.0)):
-                    if not aim_locked:
-                        aim_yaw = math.atan2(dy, dx)
-                        aim_pitch = math.atan2(dz, max(0.1, dist_2d))
-                        aim_locked = True
-                    yaw_error = abs(angle_diff(aim_yaw, cur_yaw))
-                    if yaw_error <= cone_rad:
-                        fire[slot] = True
-
-            elif kind == "mortar":
+                full_charge = max(0.01, stats.get("charge", 0.75))
+                fire[i] = charge < full_charge * 0.85 or abs(angle_diff(yaw, cur_yaw)) >= 0.12
+            elif wkind == "lightning" and d3 <= reach and me.get("energy", 0.0) >= stats.get("energy", 15.0):
+                if not locked:
+                    yaw, pitch = math.atan2(dy, dx), math.atan2(dz, max(0.1, d2))
+                    locked = True
+                cone = math.radians(stats.get("cone_deg", 30.0) * 0.5)
+                fire[i] = abs(angle_diff(yaw, cur_yaw)) <= cone
+            elif wkind == "mortar" and d2 > 10.0 and not locked:
                 speed = max(1.0, float(stats.get("speed", 72.0)))
-                gravity = max(0.1, float(self.mortar_g))
-                # Lead the target for the slower mortar flight time.
-                t_est = dist_2d / max(1.0, speed * 0.85)
-                lead_x = tx + tvx * t_est - mx
-                lead_y = ty + tvy * t_est - my
-                lead_dist_2d = math.hypot(lead_x, lead_y)
-                disc = speed**4 - gravity * (gravity * lead_dist_2d**2 + 2.0 * dz * speed**2)
-                if 0.0 <= disc and 10.0 < lead_dist_2d <= stats.get("range", 0.0) and not aim_locked:
-                    aim_yaw = math.atan2(lead_y, lead_x)
-                    aim_pitch = math.atan(
-                        (speed**2 - math.sqrt(disc)) / (gravity * max(1.0, lead_dist_2d))
-                    )
-                    aim_locked = True
-                    mortar_lobbing = True
-                    if abs(angle_diff(aim_yaw, cur_yaw)) < 0.2:
-                        fire[slot] = True
-
-            elif kind == "gun":
-                # Avoid firing the gun into the sky while the mortar uses a high arc.
-                if mortar_lobbing:
-                    continue
-                if (dist_3d <= stats.get("range", 0.0) and direct_los
-                        and weapon.get("reload", 0) == 0):
-                    speed = max(1.0, float(stats.get("speed", 250.0)))
-                    flight_time = dist_3d / speed
-                    lead_x = tx + tvx * flight_time - mx
-                    lead_y = ty + tvy * flight_time - my
-                    lead_z = target_center_z + tvz * flight_time - muzzle_z
-                    if not aim_locked:
-                        aim_yaw = math.atan2(lead_y, lead_x)
-                        aim_pitch = math.atan2(lead_z, max(0.1, math.hypot(lead_x, lead_y)))
-                        aim_locked = True
-                    if abs(angle_diff(aim_yaw, cur_yaw)) < 0.25:
-                        fire[slot] = True
-
-        return [aim_yaw, aim_pitch], fire
+                gravity = max(0.1, self.mortar_g)
+                flight = d2 / (0.85 * speed)
+                lead_x, lead_y, lead_z = dx + tvx * flight, dy + tvy * flight, dz + tvz * flight
+                distance = math.hypot(lead_x, lead_y)
+                disc = speed**4 - gravity * (gravity * distance**2 + 2.0 * lead_z * speed**2)
+                if disc >= 0.0 and 10.0 < distance <= reach:
+                    yaw = math.atan2(lead_y, lead_x)
+                    pitch = math.atan((speed**2 - math.sqrt(disc)) / (gravity * distance))
+                    locked = mortar_lobbing = True
+                    fire[i] = abs(angle_diff(yaw, cur_yaw)) < 0.20
+        return [yaw, pitch], fire
 
     def pick_upgrade(self, choices, me):
         if not choices:
@@ -620,7 +468,8 @@ class Bot:
                 self.shorted_until = max(self.shorted_until, now + event.get("duration", 2.0))
             elif kind == "concussed":
                 self.concussed_until = max(self.concussed_until, now + event.get("duration", 1.5))
-        self.remember_sounds(obs)
+            elif kind in ("heard", "sound"):
+                self.sound_memory.append((now, event.get("bearing", 0.0), event.get("weight", 1.0)))
 
         if damage_alert_yaw is not None:
             self.alert_yaw = damage_alert_yaw
@@ -638,51 +487,37 @@ class Bot:
                 if nearest_sound.get("bearing") is not None:
                     self.alert_yaw = float(nearest_sound["bearing"])
                     self.alert_until = max(self.alert_until, now + max(0.5, 1.5 - float(nearest_sound.get("age", 0.0))))
+        self.sound_memory = [s for s in self.sound_memory if now - s[0] <= 3.0]
 
         loot_goal, loot_nearby, drop_opp = self.loot_target(obs)
         features = self.extract_features(obs, (loot_nearby, drop_opp))
         scores, hidden = self.brain.forward_with_hidden(features)
-        outside_zone = features[2]
-        zone_urgency = features[3]
-        must_rotate = outside_zone > 0.5 or zone_urgency > 0.92
-        hp_ratio = features[0]
-        enemy_visible = bool(features[4])
-        opening_loot = hp_ratio > 0.75 and not enemy_visible and features[8] > 0.65
-        losing_duel = features[6] < -0.15 or features[7] < 0.0
-        need_cover = hp_ratio < 0.55 or bool(features[10]) or losing_duel
-        threatened = features[11] >= 0.8 or (enemy_visible and features[5] >= 0.5)
-        if must_rotate:
-            mode = 3
-        elif opening_loot:
-            mode = 2
-        elif need_cover:
-            mode = 1
-        elif self.starter_target is not None and not enemy_visible:
-            mode = 2
-        else:
-            mode = self.choose_mode(scores)
-        # Do not abandon cover for loot while critically wounded and under
-        # pressure. This final guard also protects against later mode overrides.
-        if (mode == 2 and hp_ratio < 0.45
-                and (enemy_visible or bool(self.active_sounds(now)))):
-            mode = 1
-        self.current_mode = mode
+        mode = self.choose_mode(scores)
         nearest = self.nearest_enemy(obs)
         me_pos = me.get("pos", (0.0, 0.0, 0.0))
         enemy_distance = distance3(me_pos, nearest.get("pos", me_pos)) if nearest else math.inf
         zone = obs.get("zone", {})
-        threat_yaw = None
-        if mode == 1:
-            goal, threat_yaw = self.retreat_goal(obs, must_rotate)
-        elif must_rotate:
-            goal = zone["center"]
-        elif mode == 3:
+        must_rotate = not me.get("in_zone", True)
+
+        weapons = me.get("weapons", [])
+        held = {w.get("kind") for w in weapons if isinstance(w, dict)}
+        opening_pickup = None
+        if not must_rotate and now < 6.0 and held == {"gun"} and features[0] > 0.75:
+            candidates = (
+                (distance3(me_pos, item["pos"]), index, item)
+                for index, item in enumerate(obs.get("pickups", []))
+                if item.get("kind") not in (None, "gun") and item.get("pos") is not None
+            )
+            closest = min(candidates, default=None)
+            if closest is not None and closest[0] <= 40.0:
+                opening_pickup = closest[2]
+                mode = 2
+                loot_goal = opening_pickup["pos"]
+
+        if must_rotate or mode == 3:
             goal = self.safe_edge_anchor(obs)
         elif mode == 2 and loot_goal is not None:
             goal = loot_goal[:2]
-        elif (mode == 0 and self.starter_target is not None and nearest is not None
-              and 30.0 <= distance3(self.starter_target["pos"], nearest["pos"]) <= 210.0):
-            goal = self.starter_target["pos"][:2]
         elif nearest is not None:
             target_range = 55.0
             kinds = {w.get("kind") for w in me.get("weapons", []) if isinstance(w, dict)}
@@ -705,20 +540,13 @@ class Bot:
             goal = self.safe_edge_anchor(obs)
 
         movement, jump, urgent_dodge = self.move(obs, goal)
-        if (me.get("grounded") is False and self.stuck_ticks >= 2
-                and me.get("energy", 0.0) > 25.0):
-            # In this game, holding jump in the air activates the upward jets.
+        if me.get("grounded") is False and self.stuck_ticks >= 2 and me.get("energy", 0.0) > 25.0:
             jump = True
-        weapons = me.get("weapons", [])
-        held = {w.get("kind") for w in weapons if isinstance(w, dict)}
-        need_first_weapon = len(held) < 2 and "gun" in held
         enemy_charging = nearest is not None and nearest.get("charging", False)
         should_boost = (
             (not me.get("in_zone", True) and any(movement))
             or (urgent_dodge and me.get("energy", 0.0) > 30.0)
-            or (need_first_weapon and (mode == 2 or (mode == 0 and self.starter_target is not None))
-                and loot_goal is not None and me.get("energy", 0.0) > 35.0)
-            or (mode == 1 and threatened and me.get("energy", 0.0) > 0.0)
+            or (opening_pickup is not None and me.get("energy", 0.0) > 30.0)
             or (mode == 1 and me.get("energy", 0.0) > 40.0
                 and ((now - self.last_damage_t) < 1.2 or enemy_charging))
             or (not me.get("grounded", True) and me.get("energy", 0.0) > 30.0)
@@ -738,20 +566,17 @@ class Bot:
 
         # Pick up a nearby unowned weapon when a slot is available.
         if None in weapons or len(weapons) < 2:
-            take_candidates = [self.starter_target] if self.starter_target is not None else obs.get("pickups", [])
-            for item in take_candidates:
+            for item in obs.get("pickups", []):
                 if item.get("kind") in held or item.get("kind") == "gun":
                     continue
-                if self.in_take_range(me_pos, item):
+                d = distance3(me_pos, item.get("pos", me_pos))
+                if d <= self.pickup_radius:
                     action["take"] = item.get("id")
                     break
 
         target = self.target_for_combat(obs)
         if target is not None:
             action["aim"], action["fire"] = self.compute_aim_and_fire(obs, target)
-            tx, ty, _ = target.get("pos", me_pos)
-            self.alert_yaw = math.atan2(ty - me_pos[1], tx - me_pos[0])
-            self.alert_until = now + 1.0
         else:
             action["fire"] = [False] * len(weapons)
             if self.alert_yaw is not None and (now < self.alert_until or mode == 1):
@@ -762,10 +587,6 @@ class Bot:
                 self.scan_yaw = (current_yaw + 0.35 + math.pi) % (2.0 * math.pi) - math.pi
                 action["aim"] = [self.scan_yaw, 0.0]
 
-        if threat_yaw is not None:
-            if abs(angle_diff(action["aim"][0], threat_yaw)) > 0.08:
-                action["fire"] = [False] * len(weapons)
-            action["aim"] = [threat_yaw, action["aim"][1]]
         return action
 
 

@@ -1,20 +1,44 @@
 {
+  "files": {
+    "bot.py": "[](https://chatgpt.com/library?file_id=libfile_7d48438d98ec81918c9bdd8f88c364a1&account_id=personal)",
+    "weights.json": "[](https://chatgpt.com/library?file_id=libfile_1b13578bf8a88191ae0739451382de0e&account_id=personal)"
+  },
+  "replay": {
+    "opening_decision": "On the same swarm seed, the original chose LOOT at +4.42. The patch chose KITE immediately at +10.16, with LOOT at -3.58.",
+    "hp_at_2.6s_before_after": [382.1, 489.2],
+    "survival_seconds_before_after": [3.4, 4.2],
+    "weapons_picked_up_before_after": [0, 0]
+  },
   "W1": [
-    [0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [0.25, 0.1, 0.0, 0.0, 0.0, 0.0, 2.0, 2.5, 0.0, 0.0, -2.0, 0.0],
-    [0.0, 0.0, 17.5, 17.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [1.3, -0.3, 0.0, -0.6, -6.9, -0.65, 0.0, 0.0, 12.0, 9.0, 0.0, -0.5],
-    [-48.0, -0.05, 0.0, 0.0, 0.03, 0.2, -0.1, -0.1, 0.0, 0.0, 51.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 12.0, 0.0, 12.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 16.0],
-    [0.0, 0.0, -2.9, -0.8, -0.9, -3.1, 0.0, 0.0, 0.0, 4.4, 0.0, -3.25]
+    [0,0,0,0,4,0,0,0,0,0,0,0],
+    [6.5,0.9,0,0,0,0,4.5,3.6,0,0,-2.1,0],
+    [0,0,5.5,0.6,0,0,0,0,0,0,0,0],
+    [1.3,-0.9,0,-1.35,-4,0,0,0,15,15,0,-4],
+    [-1,-0.25,0,0,14,16,0,-0.6,0,0,4.4,0],
+    [-8,0,0,0,4.5,0.7,9.7,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,16],
+    [0,0,-2.9,-0.8,-0.9,-3.1,0,0,0,4.4,0,-3.25]
   ],
-  "B1": [-2.0, -1.6, -12.9, -4.1, 35.85, -13.5, -9.6, -1.65],
+  "B1": [-2,-7.32,-0.506,-1.5,-18.4,-2.675,-9.6,-1.65],
   "W2": [
-    [0.75, 1.921, -0.2, -0.25, -3.511, 6.5, 0.45, 0.0],
-    [0.75, -1.45, -0.2, -0.25, 1.85, -0.5, 0.45, 0.0],
-    [-3.7, -1.2, -0.8, 4.85, -1.3, 0.0, -0.25, 0.45],
-    [-1.3, -0.2, 10.0, -2.2, -1.15, 0.0, -0.3, -0.3]
+    [4.8,1.12,-0.45,-0.055,-2,1.7,-2,0],
+    [3.3,-1.12,-6,0.055,5.1,-1.35,7.2,0],
+    [-0.55,0,-5.1,4.25,-2.5,0,-4,0.6],
+    [-1.4,-3.4,16,0,0,0,0,0]
   ],
-  "B2": [-5.151, 1.5, 1.025, 9.0]
+  "B2": [-2.608,7.7,-8.15,-1.04],
+  "controller_changes": {
+    "threat": "Inside the current circle, sound_threat >= 0.8 or a visible mech with enemy_close >= 0.5 selects KITE before mode hysteresis. Read obs.sounds once per decision, using sound events only when that field is absent.",
+    "kite": "Sum all visible mech bearings weighted by 1/(1 + distance/60) and recent sound bearings weighted by distance and age. Face the sum. Move away with a 0.45 lateral component. If bearings cancel, use the strongest source.",
+    "loot": "With only the starter gun, an empty slot, no visible enemy and sound_threat < 0.4, select an in-range weapon first, then the nearest visible weapon inside the circle. Prioritize it over cubes, NPCs and drops. Send its exact ID in take when within pickup_radius horizontally and 4 m vertically.",
+    "zone": "Urgency uses zone.center and zone.radius. Outside the circle, select ROTATE. Under threat, steer inward while strafing and facing the combined threat."
+  },
+  "validation": "Raw KITE won all 50,736 tested in-zone threat inputs before the controller override. The smallest tested lead was 0.428. Controller tests also verified weapon selection over a closer cube, the take command, combined-threat facing and inward escape.",
+  "telemetry_targets": {
+    "comparison": "Compare slot 0 across the same 96 seeds with opponent controllers and weights frozen. The measured replay above covers one seed.",
+    "reaction": "For sound-only and close-visible threat onsets separately, require 100% same-decision KITE inside the circle, including at full HP. Require zero LOOT decisions while either threat is active.",
+    "movement": "On unobstructed KITE decisions away from the circle boundary and without a projectile dodge, require move dot threat_direction < 0, lateral-to-retreat ratio 0.45, and commanded yaw within 1 degree of the threat bearing. Measure actual rear hits divided by incoming weapon hits.",
+    "pickup": "On safe starter decisions with an eligible weapon, require 100% LOOT with that weapon as the goal. When in range, require take to equal its ID. Count confirmed acquisitions from inventory and target more than 0.19 weapons per match.",
+    "outcomes": "Target mean survival above 28.1 s, gun damage taken below 1291 per match, storm damage at or below 34.5 per match, and mean points above 4.125."
+  }
 }
